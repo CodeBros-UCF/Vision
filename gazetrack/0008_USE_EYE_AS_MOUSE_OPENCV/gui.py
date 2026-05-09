@@ -282,6 +282,41 @@ class GazeTrackApp(ctk.CTk):
                                         font=ctk.CTkFont("Inter", 13, weight="bold"))
         self._blink_lbl.pack(side="left", padx=24)
 
+        # ── Calibration panel ─────────────────────────────────────────────────
+        cal_frame = ctk.CTkFrame(main, fg_color=BG_CARD, corner_radius=16)
+        cal_frame.pack(fill="x", pady=(0, 12))
+
+        cal_header = ctk.CTkFrame(cal_frame, fg_color="transparent")
+        cal_header.pack(fill="x", padx=18, pady=(14, 6))
+        ctk.CTkLabel(cal_header, text="GAZE CALIBRATION", text_color=TEXT_DIM,
+                     font=ctk.CTkFont("Inter", 10)).pack(side="left")
+
+        self._cal_badge = ctk.CTkLabel(cal_header, text="● NOT CALIBRATED",
+                                        text_color=YELLOW_MET,
+                                        font=ctk.CTkFont("Inter", 10, weight="bold"))
+        self._cal_badge.pack(side="right")
+
+        cal_body = ctk.CTkFrame(cal_frame, fg_color="transparent")
+        cal_body.pack(fill="x", padx=18, pady=(0, 14))
+
+        ctk.CTkLabel(cal_body,
+                     text="Run 9-point calibration to map your gaze to screen coordinates accurately.",
+                     text_color=TEXT_DIM,
+                     font=ctk.CTkFont("Inter", 11),
+                     wraplength=480, justify="left").pack(side="left", fill="x", expand=True)
+
+        self._cal_btn = ctk.CTkButton(
+            cal_body, text="⊕  Calibrate",
+            font=ctk.CTkFont("Inter", 12, weight="bold"),
+            fg_color="#1e1e2e", hover_color="#2d2d3e",
+            border_width=1, border_color=ACCENT,
+            text_color=ACCENT,
+            height=36, width=130, corner_radius=10,
+            state="disabled",
+            command=self._on_calibrate
+        )
+        self._cal_btn.pack(side="right", padx=(12, 0))
+
         # ── Config summary ────────────────────────────────────────────────────
         self._config_frame = ctk.CTkFrame(main, fg_color=BG_CARD2, corner_radius=16)
         self._config_frame.pack(fill="x", pady=(0, 16))
@@ -391,6 +426,7 @@ class GazeTrackApp(ctk.CTk):
         self._start_btn.configure(state="disabled")
         self._stop_btn.configure(state="normal")
         self._pause_btn.configure(state="normal")
+        self._cal_btn.configure(state="normal")
 
     def _on_stop(self):
         if self._engine:
@@ -401,6 +437,8 @@ class GazeTrackApp(ctk.CTk):
         self._start_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
         self._pause_btn.configure(state="disabled", text="⏸  Pause")
+        self._cal_btn.configure(state="disabled")
+        self._cal_badge.configure(text="● NOT CALIBRATED", text_color=YELLOW_MET)
 
     def _on_pause(self):
         if not self._engine:
@@ -413,6 +451,34 @@ class GazeTrackApp(ctk.CTk):
             self._engine.resume()
             self._pause_btn.configure(text="⏸  Pause")
             self._status_dot.configure(text="● LIVE", text_color=GREEN_MET)
+
+    def _on_calibrate(self):
+        if not self._engine or not self._running:
+            return
+        self._cal_btn.configure(state="disabled", text="⏳  Calibrating…")
+        self._cal_badge.configure(text="● CALIBRATING", text_color=YELLOW_MET)
+
+        def on_complete(cmap):
+            self.after(0, self._on_calibration_done, cmap)
+
+        def on_cancel():
+            self.after(0, self._on_calibration_cancelled)
+
+        self._engine.start_calibration(
+            on_complete=on_complete,
+            on_cancel=on_cancel,
+        )
+
+    def _on_calibration_done(self, cmap):
+        if cmap.is_valid:
+            self._cal_badge.configure(text="● CALIBRATED ✓", text_color=GREEN_MET)
+        else:
+            self._cal_badge.configure(text="● CALIBRATION FAILED", text_color=RED_MET)
+        self._cal_btn.configure(state="normal", text="↺  Re-Calibrate")
+
+    def _on_calibration_cancelled(self):
+        self._cal_badge.configure(text="● NOT CALIBRATED", text_color=YELLOW_MET)
+        self._cal_btn.configure(state="normal", text="⊕  Calibrate")
 
     def _on_engine_ready(self, gpu_info: GPUInfo, tier: GPUTier, cfg: TierConfig):
         self.after(0, lambda: self._tier_badge.set_tier(tier, cfg))

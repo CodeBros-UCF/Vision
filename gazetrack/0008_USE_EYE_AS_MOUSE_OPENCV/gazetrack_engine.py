@@ -12,6 +12,8 @@ Adaptive GPU Tiers:
   ENHANCED     - High-end GPU          → 1280x720, 60 FPS inference, predictive model
 """
 
+from calibration import CalibrationMap, CalibrationWindow
+
 import cv2
 import mediapipe as mp
 import pyautogui
@@ -217,13 +219,15 @@ class LatencyBuffer:
 # ─── Shared State (lock-protected) ───────────────────────────────────────────
 class SharedState:
     def __init__(self):
-        self._lock           = threading.Lock()
-        self.latest_frame    = None   # BGR ndarray from capture thread
-        self.latest_result   = None   # Dict from inference thread
-        self.capture_ts      = 0.0    # Timestamp of latest captured frame
-        self.inference_ts    = 0.0    # Timestamp of latest inference result
-        self.running         = True
-        self.paused          = False
+        self._lock              = threading.Lock()
+        self.latest_frame       = None   # BGR ndarray from capture thread
+        self.latest_result      = None   # Dict from inference thread
+        self.capture_ts         = 0.0    # Timestamp of latest captured frame
+        self.inference_ts       = 0.0    # Timestamp of latest inference result
+        self.running            = True
+        self.paused             = False
+        self.calibration_map    = CalibrationMap()   # Identity until calibrated
+        self.calibration_status = "uncalibrated"     # uncalibrated | running | done | failed
 
     def write_frame(self, frame, ts):
         with self._lock:
@@ -258,6 +262,23 @@ class SharedState:
     def set_paused(self, val: bool):
         with self._lock:
             self.paused = val
+
+    def set_calibration_map(self, cmap: CalibrationMap):
+        with self._lock:
+            self.calibration_map    = cmap
+            self.calibration_status = "done" if cmap.is_valid else "failed"
+
+    def get_calibration_map(self) -> CalibrationMap:
+        with self._lock:
+            return self.calibration_map
+
+    def get_calibration_status(self) -> str:
+        with self._lock:
+            return self.calibration_status
+
+    def set_calibration_status(self, status: str):
+        with self._lock:
+            self.calibration_status = status
 
 # ─── Metrics ──────────────────────────────────────────────────────────────────
 @dataclass
@@ -410,6 +431,11 @@ class InferenceThread(threading.Thread):
                     self._ema_y = self._ema(self._ema_y, sy, self.config.smoothing_alpha)
                     sx, sy = self._ema_x, self._ema_y
 
+                # Apply calibration map if available
+                cmap = self.shared.get_calibration_map()
+                if cmap.is_valid:
+                    sx, sy = cmap.apply(sx, sy)
+
                 result["gaze_screen_x"] = int(sx)
                 result["gaze_screen_y"] = int(sy)
 
@@ -487,7 +513,7 @@ class RenderThread(threading.Thread):
 
         # Metrics text
         fps_txt     = f"Capture: {m.capture_fps:.0f}fps  Inf: {m.inference_fps:.0f}fps  Render: {m.render_fps:.0f}fps"
-        latency_txt = f"Latency  Cap→Inf: {m.cap_to_inf_latency_ms:.1f}ms  Total: {m.total_latency_ms:.1f}ms"
+        latency_txt = f"Latency  Cap\u2192Inf: {m.cap_to_inf_latency_ms:.1f}ms  Total: {m.total_latency_ms:.1f}ms"
 
         cv2.putText(frame, fps_txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                     (0, 255, 180), 1, cv2.LINE_AA)
@@ -498,6 +524,15 @@ class RenderThread(threading.Thread):
         tier_label = self.config.name.split(" ")[0]
         cv2.putText(frame, tier_label, (w - 120, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (200, 160, 255), 1, cv2.LINE_AA)
+
+        # Calibration status badge
+        cal_status = self.shared.get_calibration_status()
+        if cal_status == "done":
+            cv2.putText(frame, "CAL OK", (w - 120, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (80, 220, 80), 1, cv2.LINE_AA)
+        elif cal_status == "running":
+            cv2.putText(frame, "CALIBRATING", (w - 160, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (250, 200, 50), 1, cv2.LINE_AA)
 
         # Draw iris landmarks
         if result and result["iris_landmarks"]:
@@ -610,11 +645,14 @@ class GazeTrackEngine:
         self.tier   = tier_override or self.gpu_info.tier
         self.config = TIER_CONFIGS[self.tier]
 
-        # 3. Shared state + metrics
+        # 3. Screen size (used by calibration)
+        self._screen_w, self._screen_h = pyautogui.size()
+
+        # 4. Shared state + metrics
         self.shared  = SharedState()
         self.metrics = MetricsStore()
 
-        # 4. Build threads
+        # 5. Build threads
         self.capture_thread   = CaptureThread(self.shared, self.metrics, self.config)
         self.inference_thread = InferenceThread(self.shared, self.metrics, self.config)
         self.render_thread    = RenderThread(
@@ -643,6 +681,56 @@ class GazeTrackEngine:
     def wait(self):
         for t in [self.capture_thread, self.inference_thread, self.render_thread]:
             t.join(timeout=5.0)
+
+    def start_calibration(self,
+                          on_complete: Optional[Callable] = None,
+                          on_cancel:   Optional[Callable] = None):
+        """
+        Launch a 9-point fullscreen calibration session.
+        Pauses mouse movement during calibration, then resumes.
+        """
+        if self.shared.get_calibration_status() == "running":
+            return  # Already calibrating
+
+        self.shared.set_calibration_status("running")
+        self.shared.set_paused(True)  # Pause inference-driven mouse movement
+
+        def _get_raw_gaze():
+            """Returns the RAW (uncalibrated) iris screen coordinate."""
+            result, _ = self.shared.read_result()
+            if result and result.get("iris_landmarks"):
+                # We need raw pixel coords from the last frame
+                frame, _ = self.shared.read_frame()
+                if frame is not None:
+                    h, w = frame.shape[:2]
+                    iris = result["iris_landmarks"]
+                    raw_x = int(iris[1].x * w)
+                    raw_y = int(iris[1].y * h)
+                    sx = int(self._screen_w / w * raw_x)
+                    sy = int(self._screen_h / h * raw_y)
+                    return float(sx), float(sy)
+            return None
+
+        def _on_complete(cmap: CalibrationMap):
+            self.shared.set_calibration_map(cmap)
+            self.shared.set_paused(False)
+            if on_complete:
+                on_complete(cmap)
+
+        def _on_cancel():
+            self.shared.set_calibration_status("uncalibrated")
+            self.shared.set_paused(False)
+            if on_cancel:
+                on_cancel()
+
+        cal = CalibrationWindow(
+            screen_w=self._screen_w,
+            screen_h=self._screen_h,
+            get_raw_gaze_fn=_get_raw_gaze,
+            on_complete=_on_complete,
+            on_cancel=_on_cancel,
+        )
+        cal.start()
 
     def switch_tier(self, new_tier: GPUTier):
         """Restart engine with a different tier."""
