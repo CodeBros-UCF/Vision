@@ -143,24 +143,43 @@ class CalibrationWindow(threading.Thread):
         total   = len(self._points)
         success = True
 
+        # ── Intro screen (1.5 seconds) ────────────────────────────────────
+        intro = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
+        cv2.putText(intro, "GAZE CALIBRATION",
+                    (self.screen_w // 2 - 220, self.screen_h // 2 - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 255), 2, cv2.LINE_AA)
+        cv2.putText(intro, "Look at each green dot and hold your gaze steady.",
+                    (self.screen_w // 2 - 300, self.screen_h // 2 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 140, 160), 1, cv2.LINE_AA)
+        cv2.putText(intro, "Press ESC at any time to skip calibration.",
+                    (self.screen_w // 2 - 250, self.screen_h // 2 + 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (90, 90, 120), 1, cv2.LINE_AA)
+        cv2.imshow(WIN, intro)
+        key = cv2.waitKey(1800)
+        if key == 27:
+            cv2.destroyWindow(WIN)
+            self.on_cancel()
+            return
+
         for idx, (tx, ty) in enumerate(self._points):
             # ── Shrink canvas to screen size
             canvas = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
 
             # Draw instructions
-            step_text = f"Point {idx + 1} / {total}   —   Look at the dot and hold still"
+            step_text = f"Point {idx + 1} / {total}   —   Look at the GREEN dot and hold still"
             cv2.putText(canvas, step_text,
-                        (self.screen_w // 2 - 280, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 120, 160), 1, cv2.LINE_AA)
+                        (self.screen_w // 2 - 300, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 180, 160), 1, cv2.LINE_AA)
 
-            esc_text = "Press ESC to cancel calibration"
+            esc_text = "Press ESC to skip calibration"
             cv2.putText(canvas, esc_text,
                         (self.screen_w - 340, self.screen_h - 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 80, 100), 1, cv2.LINE_AA)
 
-            # Draw all previous dots (dim)
+            # Draw all previous dots (dim green = done)
             for i, (px, py) in enumerate(self._points[:idx]):
-                cv2.circle(canvas, (px, py), 10, (30, 40, 30), -1)
+                cv2.circle(canvas, (px, py), 10, (30, 60, 30), -1)
+                cv2.circle(canvas, (px, py), 6, (40, 100, 40), -1)
 
             # Draw upcoming dots (very dim)
             for i, (px, py) in enumerate(self._points[idx + 1:]):
@@ -177,9 +196,9 @@ class CalibrationWindow(threading.Thread):
 
                 frame = canvas.copy()
 
-                # Outer glow ring
+                # Outer glow ring (pulses)
                 glow_radius = 32 + int(4 * abs(np.sin(elapsed * 4)))
-                cv2.circle(frame, (tx, ty), glow_radius, (40, 60, 120), 2)
+                cv2.circle(frame, (tx, ty), glow_radius, (40, 100, 60), 2)
 
                 # Progress arc
                 if elapsed > self.SAMPLE_DELAY:
@@ -189,10 +208,16 @@ class CalibrationWindow(threading.Thread):
                     cv2.ellipse(frame, (tx, ty), (28, 28), -90, 0, sweep,
                                 (99, 210, 130), 3)
 
-                # Center dot
-                dot_color = (200, 240, 200) if not settled else (100, 255, 150)
-                cv2.circle(frame, (tx, ty), 10, dot_color, -1)
-                cv2.circle(frame, (tx, ty), 11, (255, 255, 255), 1)
+                # Center dot — bright green when active
+                dot_color = (80, 240, 80) if not settled else (100, 255, 150)
+                cv2.circle(frame, (tx, ty), 12, dot_color, -1)
+                cv2.circle(frame, (tx, ty), 13, (255, 255, 255), 1)
+
+                # Show "collecting" text when sampling
+                if settled:
+                    cv2.putText(frame, f"Collecting... ({len(samples)} samples)",
+                                (tx - 80, ty + 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 180, 120), 1, cv2.LINE_AA)
 
                 # Sample collection after settle delay
                 if elapsed > self.SAMPLE_DELAY:
@@ -221,11 +246,23 @@ class CalibrationWindow(threading.Thread):
                 self._raw_collected.append((avg_x, avg_y))
                 self._screen_targets.append((float(tx), float(ty)))
             else:
-                # No gaze data — skip this point (will degrade calibration accuracy)
+                # Not enough gaze data — skip this point
                 pass
 
             if not success:
                 break
+
+        # ── Completion screen ──────────────────────────────────────────────────
+        if success and len(self._raw_collected) >= 6:
+            done_screen = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
+            cv2.putText(done_screen, "CALIBRATION COMPLETE",
+                        (self.screen_w // 2 - 250, self.screen_h // 2 - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (100, 255, 130), 2, cv2.LINE_AA)
+            cv2.putText(done_screen, f"Successfully calibrated with {len(self._raw_collected)} points.",
+                        (self.screen_w // 2 - 240, self.screen_h // 2 + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 160, 140), 1, cv2.LINE_AA)
+            cv2.imshow(WIN, done_screen)
+            cv2.waitKey(1200)
 
         cv2.destroyWindow(WIN)
 

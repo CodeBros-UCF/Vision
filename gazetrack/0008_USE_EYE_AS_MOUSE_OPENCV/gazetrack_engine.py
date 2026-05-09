@@ -226,6 +226,7 @@ class SharedState:
         self.inference_ts       = 0.0    # Timestamp of latest inference result
         self.running            = True
         self.paused             = False
+        self.calibrating        = False  # Inference runs but mouse movement stops
         self.calibration_map    = CalibrationMap()   # Identity until calibrated
         self.calibration_status = "uncalibrated"     # uncalibrated | running | done | failed
 
@@ -254,6 +255,14 @@ class SharedState:
     def is_paused(self):
         with self._lock:
             return self.paused
+
+    def is_calibrating(self):
+        with self._lock:
+            return self.calibrating
+
+    def set_calibrating(self, val: bool):
+        with self._lock:
+            self.calibrating = val
 
     def stop(self):
         with self._lock:
@@ -589,17 +598,18 @@ class RenderThread(threading.Thread):
                 cpu_bottleneck=cpu_bottleneck,
             )
 
-            # Mouse movement
-            if result and result["gaze_screen_x"] is not None:
-                pyautogui.moveTo(result["gaze_screen_x"], result["gaze_screen_y"])
-                if result["blink"]:
-                    if not self._click_held:
-                        pyautogui.mouseDown()
-                        self._click_held = True
-                else:
-                    if self._click_held:
-                        pyautogui.mouseUp()
-                        self._click_held = False
+            # Mouse movement — skip when calibrating (inference still runs for gaze data)
+            if not self.shared.is_calibrating():
+                if result and result["gaze_screen_x"] is not None:
+                    pyautogui.moveTo(result["gaze_screen_x"], result["gaze_screen_y"])
+                    if result["blink"]:
+                        if not self._click_held:
+                            pyautogui.mouseDown()
+                            self._click_held = True
+                    else:
+                        if self._click_held:
+                            pyautogui.mouseUp()
+                            self._click_held = False
 
             # Draw and show frame
             display = self._draw_overlay(frame.copy(), result, m)
@@ -687,13 +697,14 @@ class GazeTrackEngine:
                           on_cancel:   Optional[Callable] = None):
         """
         Launch a 9-point fullscreen calibration session.
-        Pauses mouse movement during calibration, then resumes.
+        Suspends mouse movement during calibration but keeps inference
+        running so raw gaze data is available for the calibration window.
         """
         if self.shared.get_calibration_status() == "running":
             return  # Already calibrating
 
         self.shared.set_calibration_status("running")
-        self.shared.set_paused(True)  # Pause inference-driven mouse movement
+        self.shared.set_calibrating(True)  # Stops mouse movement, keeps inference alive
 
         def _get_raw_gaze():
             """Returns the RAW (uncalibrated) iris screen coordinate."""
@@ -713,13 +724,13 @@ class GazeTrackEngine:
 
         def _on_complete(cmap: CalibrationMap):
             self.shared.set_calibration_map(cmap)
-            self.shared.set_paused(False)
+            self.shared.set_calibrating(False)
             if on_complete:
                 on_complete(cmap)
 
         def _on_cancel():
             self.shared.set_calibration_status("uncalibrated")
-            self.shared.set_paused(False)
+            self.shared.set_calibrating(False)
             if on_cancel:
                 on_cancel()
 

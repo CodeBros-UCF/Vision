@@ -297,13 +297,13 @@ class GazeTrackApp(ctk.CTk):
         self._cal_badge.pack(side="right")
 
         cal_body = ctk.CTkFrame(cal_frame, fg_color="transparent")
-        cal_body.pack(fill="x", padx=18, pady=(0, 14))
+        cal_body.pack(fill="x", padx=18, pady=(0, 8))
 
         ctk.CTkLabel(cal_body,
                      text="Run 9-point calibration to map your gaze to screen coordinates accurately.",
                      text_color=TEXT_DIM,
                      font=ctk.CTkFont("Inter", 11),
-                     wraplength=480, justify="left").pack(side="left", fill="x", expand=True)
+                     wraplength=400, justify="left").pack(side="left", fill="x", expand=True)
 
         self._cal_btn = ctk.CTkButton(
             cal_body, text="⊕  Calibrate",
@@ -316,6 +316,22 @@ class GazeTrackApp(ctk.CTk):
             command=self._on_calibrate
         )
         self._cal_btn.pack(side="right", padx=(12, 0))
+
+        # Calibrate-on-start checkbox
+        cal_opt = ctk.CTkFrame(cal_frame, fg_color="transparent")
+        cal_opt.pack(fill="x", padx=18, pady=(0, 14))
+
+        self._cal_on_start_var = ctk.BooleanVar(value=True)
+        self._cal_on_start_cb = ctk.CTkCheckBox(
+            cal_opt, text="Calibrate automatically when tracking starts",
+            variable=self._cal_on_start_var,
+            font=ctk.CTkFont("Inter", 11),
+            text_color=TEXT_DIM,
+            fg_color=ACCENT, hover_color="#4f52d4",
+            border_color="#3d3d5e",
+            corner_radius=4, height=24,
+        )
+        self._cal_on_start_cb.pack(side="left")
 
         # ── Config summary ────────────────────────────────────────────────────
         self._config_frame = ctk.CTkFrame(main, fg_color=BG_CARD2, corner_radius=16)
@@ -427,6 +443,11 @@ class GazeTrackApp(ctk.CTk):
         self._stop_btn.configure(state="normal")
         self._pause_btn.configure(state="normal")
         self._cal_btn.configure(state="normal")
+
+        # Auto-calibrate if checkbox is checked
+        if self._cal_on_start_var.get():
+            # Give inference thread a moment to start producing gaze data
+            self.after(800, self._on_calibrate)
 
     def _on_stop(self):
         if self._engine:
