@@ -303,6 +303,7 @@ class Metrics:
     gaze_x: int = 0
     gaze_y: int = 0
     blink_detected: bool = False
+    click_held: bool = False
 
 class MetricsStore:
     def __init__(self):
@@ -427,23 +428,50 @@ class InferenceThread(threading.Thread):
                 iris = [lm[474], lm[475], lm[476], lm[477]]
                 result["iris_landmarks"] = iris
 
-                # Raw gaze position from landmark 475 (center-ish of iris)
-                raw_x = int(iris[1].x * w)
-                raw_y = int(iris[1].y * h)
-                sx    = int(self._screen_w / w * raw_x)
-                sy    = int(self._screen_h / h * raw_y)
+                # Eye bounds for ratio calculation
+                lx_min = min(lm[33].x, lm[133].x)
+                lx_max = max(lm[33].x, lm[133].x)
+                ly_min = min(lm[159].y, lm[145].y)
+                ly_max = max(lm[159].y, lm[145].y)
 
-                if self._kalman:
-                    sx, sy = self._kalman.update(sx, sy)
+                ic_x = sum(lm[i].x for i in range(474, 478)) / 4.0
+                ic_y = sum(lm[i].y for i in range(474, 478)) / 4.0
+
+                # Prevent division by zero and freeze gaze during blink
+                if not blink and (lx_max - lx_min) > 0 and (ly_max - ly_min) > 0:
+                    ratio_x = (ic_x - lx_min) / (lx_max - lx_min)
+                    ratio_y = (ic_y - ly_min) / (ly_max - ly_min)
+                    
+                    self._last_rx = ratio_x
+                    self._last_ry = ratio_y
                 else:
-                    self._ema_x = self._ema(self._ema_x, sx, self.config.smoothing_alpha)
-                    self._ema_y = self._ema(self._ema_y, sy, self.config.smoothing_alpha)
-                    sx, sy = self._ema_x, self._ema_y
+                    # Reuse last known ratios if blinking
+                    ratio_x = getattr(self, '_last_rx', 0.5)
+                    ratio_y = getattr(self, '_last_ry', 0.5)
 
-                # Apply calibration map if available
+                result["gaze_ratio_x"] = ratio_x
+                result["gaze_ratio_y"] = ratio_y
+
+                # Apply smoothing to the ratios
+                if self._kalman:
+                    rx, ry = self._kalman.update(ratio_x, ratio_y)
+                else:
+                    self._ema_x = self._ema(self._ema_x, ratio_x, self.config.smoothing_alpha)
+                    self._ema_y = self._ema(self._ema_y, ratio_y, self.config.smoothing_alpha)
+                    rx, ry = self._ema_x, self._ema_y
+
+                # Map to screen
                 cmap = self.shared.get_calibration_map()
                 if cmap.is_valid:
-                    sx, sy = cmap.apply(sx, sy)
+                    # Use polynomial mapping
+                    sx, sy = cmap.apply(rx, ry)
+                else:
+                    # Uncalibrated fallback: scale ratios across the screen
+                    # Ratios usually range from 0.3 to 0.7. Let's map that to 0 -> width
+                    sx = int((rx - 0.3) * (1.0 / 0.4) * self._screen_w)
+                    sy = int((ry - 0.3) * (1.0 / 0.4) * self._screen_h)
+                    sx = max(0, min(self._screen_w, sx))
+                    sy = max(0, min(self._screen_h, sy))
 
                 result["gaze_screen_x"] = int(sx)
                 result["gaze_screen_y"] = int(sy)
@@ -495,6 +523,9 @@ class RenderThread(threading.Thread):
         self._fps_counter    = collections.deque(maxlen=30)
         self._lat_buf        = LatencyBuffer()
         self._click_held     = False
+        self._last_blink_state = False
+        self._last_blink_time = 0.0
+        self._double_blink_window = 0.6  # seconds allowed between blinks
 
         # GPU VRAM polling
         self._vram_poll_interval = 2.0  # seconds
@@ -601,15 +632,30 @@ class RenderThread(threading.Thread):
             # Mouse movement — skip when calibrating (inference still runs for gaze data)
             if not self.shared.is_calibrating():
                 if result and result["gaze_screen_x"] is not None:
-                    pyautogui.moveTo(result["gaze_screen_x"], result["gaze_screen_y"])
-                    if result["blink"]:
-                        if not self._click_held:
-                            pyautogui.mouseDown()
-                            self._click_held = True
-                    else:
-                        if self._click_held:
-                            pyautogui.mouseUp()
-                            self._click_held = False
+                    # Only move if not currently blinking to reduce jitter
+                    if not result.get("blink", False):
+                        pyautogui.moveTo(result["gaze_screen_x"], result["gaze_screen_y"])
+                    
+                    # Double-blink to toggle click
+                    current_blink = result.get("blink", False)
+                    if current_blink and not self._last_blink_state:
+                        # Blink just started
+                        now = time.perf_counter()
+                        if now - self._last_blink_time < self._double_blink_window:
+                            # Double blink detected!
+                            if not self._click_held:
+                                pyautogui.mouseDown()
+                                self._click_held = True
+                            else:
+                                pyautogui.mouseUp()
+                                self._click_held = False
+                            self._last_blink_time = 0.0  # Reset
+                        else:
+                            self._last_blink_time = now
+                            
+                    self._last_blink_state = current_blink
+
+            self.metrics.update(click_held=self._click_held)
 
             # Draw and show frame
             display = self._draw_overlay(frame.copy(), result, m)
@@ -707,19 +753,14 @@ class GazeTrackEngine:
         self.shared.set_calibrating(True)  # Stops mouse movement, keeps inference alive
 
         def _get_raw_gaze():
-            """Returns the RAW (uncalibrated) iris screen coordinate."""
+            """Returns the RAW normalized eye ratios for calibration."""
             result, _ = self.shared.read_result()
-            if result and result.get("iris_landmarks"):
-                # We need raw pixel coords from the last frame
-                frame, _ = self.shared.read_frame()
-                if frame is not None:
-                    h, w = frame.shape[:2]
-                    iris = result["iris_landmarks"]
-                    raw_x = int(iris[1].x * w)
-                    raw_y = int(iris[1].y * h)
-                    sx = int(self._screen_w / w * raw_x)
-                    sy = int(self._screen_h / h * raw_y)
-                    return float(sx), float(sy)
+            if result and "gaze_ratio_x" in result and "gaze_ratio_y" in result:
+                # We use the normalized ratios (e.g., 0.3 to 0.7) as the features for calibration
+                # The calibration polynomial will stretch this to the full screen resolution!
+                rx = result["gaze_ratio_x"]
+                ry = result["gaze_ratio_y"]
+                return float(rx), float(ry)
             return None
 
         def _on_complete(cmap: CalibrationMap):

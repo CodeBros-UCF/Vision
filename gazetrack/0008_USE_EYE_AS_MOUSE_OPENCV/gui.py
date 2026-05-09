@@ -135,8 +135,8 @@ class GazeTrackApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("GazeTrack  —  Adaptive Eye Control")
-        self.geometry("980x680")
-        self.minsize(900, 620)
+        self.geometry("1024x768")
+        self.minsize(980, 720)
         self.configure(fg_color=BG_DARK)
 
         self._engine: Optional[GazeTrackEngine] = None
@@ -224,7 +224,7 @@ class GazeTrackApp(ctk.CTk):
         self._bottleneck_lbl.pack(anchor="w")
 
         # ── Main panel ───────────────────────────────────────────────────────
-        main = ctk.CTkFrame(body, fg_color="transparent")
+        main = ctk.CTkScrollableFrame(body, fg_color="transparent")
         main.pack(side="left", fill="both", expand=True)
 
         # ── Metrics row ───────────────────────────────────────────────────────
@@ -525,8 +525,10 @@ class GazeTrackApp(ctk.CTk):
         self._lat_tot.set_ms(m.total_latency_ms)
 
         self._gaze_xy.configure(text=f"Gaze: ({m.gaze_x}, {m.gaze_y})")
-        if m.blink_detected:
-            self._blink_lbl.configure(text="● BLINK CLICK")
+        if m.click_held:
+            self._blink_lbl.configure(text="● CLICK HELD", text_color=GREEN_MET)
+        elif m.blink_detected:
+            self._blink_lbl.configure(text="● BLINK", text_color=RED_MET)
         else:
             self._blink_lbl.configure(text="")
 
