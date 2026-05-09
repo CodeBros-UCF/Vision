@@ -40,13 +40,15 @@ class CalibrationMap:
         """Map raw iris screen coord → calibrated screen coord."""
         if not self.is_valid or self.coeff_x is None:
             return int(raw_x), int(raw_y)
-        feat = np.array([
-            1, raw_x, raw_y,
-            raw_x ** 2, raw_y ** 2, raw_x * raw_y
-        ], dtype=np.float64)
+            
+        feat = np.array([1, raw_x, raw_y], dtype=np.float64)
         cx = float(feat @ self.coeff_x)
         cy = float(feat @ self.coeff_y)
-        return int(np.clip(cx, 0, 99999)), int(np.clip(cy, 0, 99999))
+        
+        if np.isnan(cx) or np.isnan(cy) or np.isinf(cx) or np.isinf(cy):
+            return int(raw_x), int(raw_y)
+            
+        return int(cx), int(cy)
 
 
 def build_calibration_map(
@@ -54,30 +56,30 @@ def build_calibration_map(
     screen_points: List[Tuple[float, float]]
 ) -> CalibrationMap:
     """
-    Fit a degree-2 polynomial mapping from raw gaze coords to screen coords.
-    Requires at least 6 point pairs (we use 9).
+    Fit a stable linear/affine mapping from raw gaze ratios to screen coords.
+    Requires at least 4 point pairs.
     """
     cmap = CalibrationMap()
-    if len(raw_points) < 6:
+    if len(raw_points) < 4:
         return cmap
 
     raw    = np.array(raw_points,    dtype=np.float64)
     screen = np.array(screen_points, dtype=np.float64)
 
-    # Build polynomial feature matrix [1, x, y, x², y², xy]
+    # Build affine feature matrix [1, x, y]
     ones = np.ones((len(raw), 1))
     A = np.hstack([
         ones,
         raw[:, 0:1],
-        raw[:, 1:2],
-        raw[:, 0:1] ** 2,
-        raw[:, 1:2] ** 2,
-        (raw[:, 0:1] * raw[:, 1:2]),
-    ])  # shape: (N, 6)
+        raw[:, 1:2]
+    ])  # shape: (N, 3)
 
     # Solve least-squares for X and Y independently
-    result_x, _, _, _ = np.linalg.lstsq(A, screen[:, 0], rcond=None)
-    result_y, _, _, _ = np.linalg.lstsq(A, screen[:, 1], rcond=None)
+    try:
+        result_x, _, _, _ = np.linalg.lstsq(A, screen[:, 0], rcond=None)
+        result_y, _, _, _ = np.linalg.lstsq(A, screen[:, 1], rcond=None)
+    except Exception:
+        return cmap
 
     cmap.coeff_x  = result_x
     cmap.coeff_y  = result_y
