@@ -1,6 +1,6 @@
 # Vision: Advanced Gaze Tracking & Eye-Controlled Canvas
 
-![Vision Banner](https://github.com/pranavsaigandikota/Vision/blob/main/banner.jpg)
+![Vision Banner](./LatencArtImg.png)
 
 ## Overview
 Vision is a high-performance, multi-threaded eye-controlled mouse and drawing application. It leverages Mediapipe's Face Mesh for precise iris tracking and direct Win32 API calls for ultra-low latency cursor control.
