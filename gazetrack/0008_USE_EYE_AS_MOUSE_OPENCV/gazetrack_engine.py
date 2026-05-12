@@ -316,6 +316,7 @@ class Metrics:
     cap_to_inf_latency_ms: float = 0.0
     inf_to_render_latency_ms: float = 0.0
     total_latency_ms: float = 0.0
+    avg_total_latency_ms: float = 0.0
     vram_used_mb: int = 0
     cpu_bottleneck: bool = False
     gaze_x: int = 0
@@ -448,6 +449,7 @@ class InferenceThread(threading.Thread):
                 "iris_landmarks": None,
                 "gaze_ratio_x":   None,
                 "gaze_ratio_y":   None,
+                "cap_ts":         cap_ts,
             }
 
             if detection.face_landmarks:
@@ -617,7 +619,7 @@ class RenderThread(threading.Thread):
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
         fps_txt     = f"Capture: {m.capture_fps:.0f}fps  Inf: {m.inference_fps:.0f}fps  Render: {m.render_fps:.0f}fps"
-        latency_txt = f"Latency  Cap\u2192Inf: {m.cap_to_inf_latency_ms:.1f}ms  Total: {m.total_latency_ms:.1f}ms"
+        latency_txt = f"Latency  Cap\u2192Inf: {m.cap_to_inf_latency_ms:.1f}ms  Total: {m.total_latency_ms:.1f}ms (Avg: {m.avg_total_latency_ms:.1f}ms)"
 
         cv2.putText(frame, fps_txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                     (0, 255, 180), 1, cv2.LINE_AA)
@@ -673,7 +675,9 @@ class RenderThread(threading.Thread):
                 continue
 
             render_ts = time.perf_counter()
-            total_lat = (render_ts - inf_ts) * 1000 if inf_ts > 0 else 0
+            cap_ts = result.get("cap_ts", inf_ts) if result else inf_ts
+            total_lat = (render_ts - cap_ts) * 1000 if cap_ts > 0 else 0
+            self._lat_buf.push(total_lat)
 
             if render_ts - self._last_vram_poll > self._vram_poll_interval:
                 vram = self._get_vram_used()
@@ -683,6 +687,7 @@ class RenderThread(threading.Thread):
             cpu_bottleneck = m.capture_fps < m.inference_fps * 0.8
             self.metrics.update(
                 total_latency_ms=total_lat,
+                avg_total_latency_ms=self._lat_buf.avg(),
                 cpu_bottleneck=cpu_bottleneck,
             )
 

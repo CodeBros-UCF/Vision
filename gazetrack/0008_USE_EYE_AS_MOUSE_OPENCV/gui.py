@@ -103,13 +103,16 @@ class LatencyBar(ctk.CTkFrame):
         self._bar.set(0)
         self._bar.pack(fill="x", pady=(3, 0))
 
-    def set_ms(self, val: float):
+    def set_ms(self, val: float, avg: float = None):
         pct   = min(val / self._max, 1.0)
         color = GREEN_MET if val < self._max * 0.3 else \
                 YELLOW_MET if val < self._max * 0.7 else RED_MET
         self._bar.configure(progress_color=color)
         self._bar.set(pct)
-        self._val_lbl.configure(text=f"{val:.1f} ms")
+        if avg is not None:
+            self._val_lbl.configure(text=f"{val:.1f} ms (Avg: {avg:.1f} ms)")
+        else:
+            self._val_lbl.configure(text=f"{val:.1f} ms")
 
 # ─── Tier Badge ───────────────────────────────────────────────────────────────
 class TierBadge(ctk.CTkFrame):
@@ -522,7 +525,7 @@ class GazeTrackApp(ctk.CTk):
         self._card_vram.set_value(f"{m.vram_used_mb:,}" if m.vram_used_mb else "—")
 
         self._lat_cap.set_ms(m.cap_to_inf_latency_ms)
-        self._lat_tot.set_ms(m.total_latency_ms)
+        self._lat_tot.set_ms(m.total_latency_ms, avg=m.avg_total_latency_ms)
 
         self._gaze_xy.configure(text=f"Gaze: ({m.gaze_x}, {m.gaze_y})")
         if m.click_held:

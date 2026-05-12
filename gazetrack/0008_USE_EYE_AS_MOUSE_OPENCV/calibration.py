@@ -89,22 +89,19 @@ def build_calibration_map(
 
 # ─── Calibration Point Definition ─────────────────────────────────────────────
 def get_calibration_points(screen_w: int, screen_h: int) -> List[Tuple[int, int]]:
-    """Return 9 screen-space calibration target positions (3x3 grid)."""
+    """Return 16 screen-space calibration target positions (4x4 grid)."""
     margin_x = int(screen_w * 0.08)
     margin_y = int(screen_h * 0.10)
-    cx, cy   = screen_w // 2, screen_h // 2
-
-    return [
-        (margin_x,             margin_y),               # top-left
-        (cx,                   margin_y),               # top-center
-        (screen_w - margin_x,  margin_y),               # top-right
-        (margin_x,             cy),                     # mid-left
-        (cx,                   cy),                     # center
-        (screen_w - margin_x,  cy),                     # mid-right
-        (margin_x,             screen_h - margin_y),    # bottom-left
-        (cx,                   screen_h - margin_y),    # bottom-center
-        (screen_w - margin_x,  screen_h - margin_y),   # bottom-right
-    ]
+    
+    xs = np.linspace(margin_x, screen_w - margin_x, 4, dtype=int)
+    ys = np.linspace(margin_y, screen_h - margin_y, 4, dtype=int)
+    
+    points = []
+    for y in ys:
+        for x in xs:
+            points.append((int(x), int(y)))
+            
+    return points
 
 
 # ─── Calibration Window (runs in its own thread) ──────────────────────────────
@@ -255,22 +252,24 @@ class CalibrationWindow(threading.Thread):
                 break
 
         # ── Completion screen ──────────────────────────────────────────────────
-        if success and len(self._raw_collected) >= 6:
+        min_required = int(total * 0.65)  # Require ~65% of points to succeed
+        
+        if success and len(self._raw_collected) >= min_required:
             done_screen = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
             cv2.putText(done_screen, "CALIBRATION COMPLETE",
                         (self.screen_w // 2 - 250, self.screen_h // 2 - 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (100, 255, 130), 2, cv2.LINE_AA)
-            cv2.putText(done_screen, f"Successfully calibrated with {len(self._raw_collected)} points.",
+            cv2.putText(done_screen, f"Successfully calibrated with {len(self._raw_collected)}/{total} points.",
                         (self.screen_w // 2 - 240, self.screen_h // 2 + 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 160, 140), 1, cv2.LINE_AA)
             cv2.imshow(WIN, done_screen)
             cv2.waitKey(1200)
-        elif success and len(self._raw_collected) < 6:
+        elif success and len(self._raw_collected) < min_required:
             fail_screen = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
             cv2.putText(fail_screen, "CALIBRATION FAILED",
                         (self.screen_w // 2 - 220, self.screen_h // 2 - 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (80, 80, 255), 2, cv2.LINE_AA)
-            cv2.putText(fail_screen, f"Not enough gaze data collected ({len(self._raw_collected)}/9 points). Please try again.",
+            cv2.putText(fail_screen, f"Not enough gaze data collected ({len(self._raw_collected)}/{total} points). Please try again.",
                         (self.screen_w // 2 - 320, self.screen_h // 2 + 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 250), 1, cv2.LINE_AA)
             cv2.imshow(WIN, fail_screen)
@@ -278,7 +277,7 @@ class CalibrationWindow(threading.Thread):
 
         cv2.destroyWindow(WIN)
 
-        if success and len(self._raw_collected) >= 6:
+        if success and len(self._raw_collected) >= min_required:
             cmap = build_calibration_map(self._raw_collected, self._screen_targets)
             self.on_complete(cmap)
         else:
