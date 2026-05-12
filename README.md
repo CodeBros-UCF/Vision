@@ -2,8 +2,17 @@
 
 ![Vision Banner](./LatencArtImg.png)
 
-## Overview
-Vision is a high-performance, multi-threaded eye-controlled mouse and drawing application. It leverages Mediapipe's Face Mesh for precise iris tracking and direct Win32 API calls for ultra-low latency cursor control.
+## Inspiration
+Vision was created with the goal of developing an inclusive platform that empowers individuals, especially those with limited mobility, to express their artistic creativity. By leveraging advanced eye tracking and voice recognition technologies, we aim to remove barriers and make digital art creation accessible to everyone. (Also it's really fun and cool to mess around with!)
+
+## What It Does
+Vision allows users to draw on a virtual canvas using only their eyes and voice commands:
+- **Eye tracking** controls the mouse pointer for precise drawing.
+- **Voice recognition** changes brush colors and sizes dynamically.
+- This hands-free approach creates an accessible and interactive digital art experience.
+
+## Technical Overview
+Vision's tracking core is a high-performance, multi-threaded eye-controlled mouse application. It leverages Mediapipe's Face Mesh for precise iris tracking and direct Win32 API calls for ultra-low latency cursor control.
 
 ## Key Features
 *   **High-Performance Engine**: Utilizes a three-threaded architecture (Capture, Inference, Render) to ensure smooth interaction and zero-lag feedback.
