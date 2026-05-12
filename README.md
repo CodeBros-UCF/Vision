@@ -33,8 +33,19 @@ We achieve ultra-low latency by profiling every stage of the vision pipeline:
 2.  **Inference Latency**: Measured from frame arrival to the completion of the 478-point face mesh.
 3.  **End-to-End Latency**: The total time from the physical eye movement to the Win32 cursor update.
 
-**Performance Metrics:**
-*   **Average Latency**: ~60-90ms on lower-end systems (e.g., GTX 1650).
+**Performance Metrics & Optimization History:**
+Before our major optimizations, the system suffered from severe latency (**~160-200ms+** average), making cursor movement feel sluggish and delayed. This was caused by three main bottlenecks:
+1. **The PyAutoGUI Delay:** The automation library `pyautogui` injected a hidden 0.1-second (100ms) `PAUSE` after every single cursor movement, creating a hard 100ms latency floor.
+2. **Single-Threaded Blocking:** Webcam capture, ML inference, and rendering were all running sequentially in a single loop.
+3. **Camera Queue Lag:** Unprocessed frames built up in a buffer, causing the system to calculate gaze based on stale frames.
+
+By implementing the following solutions, we achieved ultra-low latency:
+* **Direct Win32 API Calls:** Replaced `pyautogui` with direct `SetCursorPos` calls, dropping movement overhead to **~0.1ms**.
+* **Three-Threaded Architecture:** Separated Capture, Inference, and Render into parallel threads, eliminating blocking.
+* **Zero-Buffer Capture:** Forced the camera buffer to process only the most recent frame.
+
+**Current Latency:**
+*   **Average Latency**: **~60-90ms** on lower-end systems (e.g., GTX 1650).
 *   **Worst-Case Latency**: 100-200ms during heavy inference spikes.
 
 *All metrics are displayed in real-time on the GazeTrack dashboard.*
