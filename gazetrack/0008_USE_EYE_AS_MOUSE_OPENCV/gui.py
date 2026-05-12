@@ -321,7 +321,7 @@ class GazeTrackApp(ctk.CTk):
         cal_opt = ctk.CTkFrame(cal_frame, fg_color="transparent")
         cal_opt.pack(fill="x", padx=18, pady=(0, 14))
 
-        self._cal_on_start_var = ctk.BooleanVar(value=True)
+        self._cal_on_start_var = ctk.BooleanVar(value=False)
         self._cal_on_start_cb = ctk.CTkCheckBox(
             cal_opt, text="Calibrate automatically when tracking starts",
             variable=self._cal_on_start_var,

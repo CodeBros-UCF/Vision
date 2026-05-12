@@ -16,6 +16,8 @@ from calibration import CalibrationMap, CalibrationWindow
 
 import cv2
 import mediapipe as mp
+from mediapipe.tasks.python import vision as mp_vision
+from mediapipe.tasks.python.core.base_options import BaseOptions
 import pyautogui
 import numpy as np
 import threading
@@ -24,6 +26,7 @@ import collections
 import platform
 import subprocess
 import os
+import ctypes
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Callable
@@ -31,6 +34,24 @@ from typing import Optional, Callable
 # ─── Disable pyautogui failsafe for smoother operation ───────────────────────
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0  # Remove pyautogui's built-in 0.1s delay
+
+# ─── Ultra-low-latency mouse move via Win32 API (bypasses pyautogui) ─────────
+def _fast_move(x: int, y: int):
+    """Move mouse cursor using direct Win32 SetCursorPos — ~0.1ms overhead."""
+    ctypes.windll.user32.SetCursorPos(x, y)
+
+# FIX #4: Ultra-low-latency click using Win32 mouse_event, avoids pyautogui
+# internal moveTo which fights with _fast_move cursor position
+def _fast_click():
+    """Click without moving the cursor (Win32 direct call)."""
+    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
+def _fast_mouse_down():
+    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+
+def _fast_mouse_up():
+    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
 
 # ─── GPU Tier Definitions ─────────────────────────────────────────────────────
 class GPUTier(Enum):
@@ -55,7 +76,7 @@ TIER_CONFIGS = {
     GPUTier.LIGHTWEIGHT: TierConfig(
         name="Lightweight Mode",
         description="Integrated / No GPU — optimized for minimal CPU load",
-        cam_width=320, cam_height=240,
+        cam_width=640, cam_height=480,
         target_inference_fps=20,
         smoothing_alpha=0.5,
         use_kalman=False,
@@ -66,7 +87,7 @@ TIER_CONFIGS = {
     GPUTier.BALANCED: TierConfig(
         name="Balanced Mode",
         description="Mid-tier GPU (GTX 1050–1660) — smooth tracking with Kalman filter",
-        cam_width=640, cam_height=480,
+        cam_width=1280, cam_height=720,
         target_inference_fps=30,
         smoothing_alpha=0.3,
         use_kalman=True,
@@ -77,7 +98,7 @@ TIER_CONFIGS = {
     GPUTier.ENHANCED: TierConfig(
         name="Enhanced AI Mode",
         description="High-end GPU (RTX 2070+) — full precision + predictive gaze model",
-        cam_width=1280, cam_height=720,
+        cam_width=1920, cam_height=1080,
         target_inference_fps=60,
         smoothing_alpha=0.2,
         use_kalman=True,
@@ -116,7 +137,6 @@ def benchmark_gpu() -> GPUInfo:
                 vram_gb = info.vram_mb / 1024
                 name_upper = info.name.upper()
 
-                # High-end check (RTX 2070+ / 8GB+)
                 high_end_keywords = ["RTX 3", "RTX 4", "RTX 2070", "RTX 2080",
                                      "A4000", "A5000", "A6000", "TITAN", "V100", "A100"]
                 mid_tier_keywords = ["GTX 1650", "GTX 1660", "RTX 2060",
@@ -166,14 +186,12 @@ class GazeKalmanFilter:
     def __init__(self):
         self.kf = cv2.KalmanFilter(4, 2)
         dt = 1.0
-        # Transition matrix (constant velocity)
         self.kf.transitionMatrix = np.array([
             [1, 0, dt, 0],
             [0, 1, 0, dt],
             [0, 0, 1,  0],
             [0, 0, 0,  1],
         ], dtype=np.float32)
-        # Measurement matrix
         self.kf.measurementMatrix = np.array([
             [1, 0, 0, 0],
             [0, 1, 0, 0],
@@ -190,7 +208,7 @@ class GazeKalmanFilter:
             self.initialized  = True
         self.kf.correct(measurement)
         predicted = self.kf.predict()
-        return float(predicted[0]), float(predicted[1])
+        return float(predicted[0][0]), float(predicted[1][0])
 
     def reset(self):
         self.initialized = False
@@ -220,15 +238,15 @@ class LatencyBuffer:
 class SharedState:
     def __init__(self):
         self._lock              = threading.Lock()
-        self.latest_frame       = None   # BGR ndarray from capture thread
-        self.latest_result      = None   # Dict from inference thread
-        self.capture_ts         = 0.0    # Timestamp of latest captured frame
-        self.inference_ts       = 0.0    # Timestamp of latest inference result
+        self.latest_frame       = None
+        self.latest_result      = None
+        self.capture_ts         = 0.0
+        self.inference_ts       = 0.0
         self.running            = True
         self.paused             = False
-        self.calibrating        = False  # Inference runs but mouse movement stops
-        self.calibration_map    = CalibrationMap()   # Identity until calibrated
-        self.calibration_status = "uncalibrated"     # uncalibrated | running | done | failed
+        self.calibrating        = False
+        self.calibration_map    = CalibrationMap()
+        self.calibration_status = "uncalibrated"
 
     def write_frame(self, frame, ts):
         with self._lock:
@@ -295,11 +313,11 @@ class Metrics:
     capture_fps:   float = 0.0
     inference_fps: float = 0.0
     render_fps:    float = 0.0
-    cap_to_inf_latency_ms: float = 0.0   # How stale the frame is when inference runs
+    cap_to_inf_latency_ms: float = 0.0
     inf_to_render_latency_ms: float = 0.0
     total_latency_ms: float = 0.0
     vram_used_mb: int = 0
-    cpu_bottleneck: bool = False          # True if capture is significantly faster than inference
+    cpu_bottleneck: bool = False
     gaze_x: int = 0
     gaze_y: int = 0
     blink_detected: bool = False
@@ -346,7 +364,6 @@ class CaptureThread(threading.Thread):
             frame = cv2.flip(frame, 1)
             self.shared.write_frame(frame, ts)
 
-            # FPS tracking
             self._fps_counter.append(ts)
             if len(self._fps_counter) >= 2:
                 elapsed = self._fps_counter[-1] - self._fps_counter[0]
@@ -368,6 +385,11 @@ class InferenceThread(threading.Thread):
         self._fps_counter = collections.deque(maxlen=30)
         self._lat_buf     = LatencyBuffer()
         self._screen_w, self._screen_h = pyautogui.size()
+        self._click_held       = False
+        self._last_blink_state = False
+        # FIX #5: Track blink END time (falling edge) for correct double-blink window
+        self._last_blink_end_time = 0.0
+        self._double_blink_win    = 0.5  # seconds between blink ends
 
     def _ema(self, prev, current, alpha):
         if prev is None:
@@ -375,14 +397,23 @@ class InferenceThread(threading.Thread):
         return alpha * current + (1 - alpha) * prev
 
     def run(self):
-        face_mesh = mp.solutions.face_mesh.FaceMesh(
-            refine_landmarks=True,
-            max_num_faces=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
+        import os
+        # FIX #3: Use abspath of this file so model is always found regardless
+        # of what directory the user runs main.py from
+        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_landmarker.task")
 
-        interval = 1.0 / self.config.target_inference_fps
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=model_path),
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            running_mode=mp_vision.RunningMode.IMAGE,
+        )
+        face_landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+
         last_frame_ts = -1.0
 
         while self.shared.is_running():
@@ -393,17 +424,20 @@ class InferenceThread(threading.Thread):
                 continue
 
             frame, cap_ts = self.shared.read_frame()
+
             if frame is None or cap_ts == last_frame_ts:
                 time.sleep(0.001)
                 continue
 
             last_frame_ts = cap_ts
-            cap_latency   = (t_start - cap_ts) * 1000  # ms
+            # FIX #2: Guard against bogus spike on first frame before capture has written
+            cap_latency = (t_start - cap_ts) * 1000 if cap_ts > 0 else 0.0
 
             # Run Mediapipe
             h, w = frame.shape[:2]
-            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            proc  = face_mesh.process(rgb)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            detection = face_landmarker.detect(mp_image)
 
             result = {
                 "landmarks":      None,
@@ -412,47 +446,48 @@ class InferenceThread(threading.Thread):
                 "left_eye":       None,
                 "blink":          False,
                 "iris_landmarks": None,
+                "gaze_ratio_x":   None,
+                "gaze_ratio_y":   None,
             }
 
-            if proc.multi_face_landmarks:
-                lm  = proc.multi_face_landmarks[0].landmark
+            if detection.face_landmarks:
+                lm = detection.face_landmarks[0]
                 result["landmarks"] = lm
 
-                # Left eye blink detection (landmarks 145=lower, 159=upper)
                 left_eye = [lm[145], lm[159]]
                 result["left_eye"] = left_eye
-                blink = (left_eye[0].y - left_eye[1].y) < 0.01
+                blink = (left_eye[0].y - left_eye[1].y) < 0.015
                 result["blink"] = blink
 
-                # Iris landmarks 474-477
                 iris = [lm[474], lm[475], lm[476], lm[477]]
                 result["iris_landmarks"] = iris
 
-                # Eye bounds for ratio calculation
+                iris_px_x = lm[475].x * w
+                iris_px_y = lm[475].y * h
+
                 lx_min = min(lm[33].x, lm[133].x)
                 lx_max = max(lm[33].x, lm[133].x)
                 ly_min = min(lm[159].y, lm[145].y)
                 ly_max = max(lm[159].y, lm[145].y)
-
                 ic_x = sum(lm[i].x for i in range(474, 478)) / 4.0
                 ic_y = sum(lm[i].y for i in range(474, 478)) / 4.0
 
-                # Prevent division by zero and freeze gaze during blink
                 if not blink and (lx_max - lx_min) > 0 and (ly_max - ly_min) > 0:
                     ratio_x = (ic_x - lx_min) / (lx_max - lx_min)
                     ratio_y = (ic_y - ly_min) / (ly_max - ly_min)
-                    
                     self._last_rx = ratio_x
                     self._last_ry = ratio_y
+                    self._last_iris_px_x = iris_px_x
+                    self._last_iris_px_y = iris_px_y
                 else:
-                    # Reuse last known ratios if blinking
                     ratio_x = getattr(self, '_last_rx', 0.5)
                     ratio_y = getattr(self, '_last_ry', 0.5)
+                    iris_px_x = getattr(self, '_last_iris_px_x', w / 2)
+                    iris_px_y = getattr(self, '_last_iris_px_y', h / 2)
 
                 result["gaze_ratio_x"] = ratio_x
                 result["gaze_ratio_y"] = ratio_y
 
-                # Apply smoothing to the ratios
                 if self._kalman:
                     rx, ry = self._kalman.update(ratio_x, ratio_y)
                 else:
@@ -460,55 +495,88 @@ class InferenceThread(threading.Thread):
                     self._ema_y = self._ema(self._ema_y, ratio_y, self.config.smoothing_alpha)
                     rx, ry = self._ema_x, self._ema_y
 
-                # Map to screen
                 cmap = self.shared.get_calibration_map()
                 if cmap.is_valid:
-                    # Use polynomial mapping
                     sx, sy = cmap.apply(rx, ry)
                 else:
-                    # Uncalibrated fallback: scale ratios across the screen
-                    # Ratios usually range from 0.3 to 0.7. Let's map that to 0 -> width
-                    sx = int((rx - 0.3) * (1.0 / 0.4) * self._screen_w)
-                    sy = int((ry - 0.3) * (1.0 / 0.4) * self._screen_h)
-                    sx = max(0, min(self._screen_w, sx))
-                    sy = max(0, min(self._screen_h, sy))
+                    sx = int(iris_px_x / w * self._screen_w)
+                    sy = int(iris_px_y / h * self._screen_h)
+
+                sx = max(0, min(self._screen_w - 1, sx))
+                sy = max(0, min(self._screen_h - 1, sy))
 
                 result["gaze_screen_x"] = int(sx)
                 result["gaze_screen_y"] = int(sy)
 
             inf_ts = time.perf_counter()
-            inf_latency = (inf_ts - t_start) * 1000
 
             self.shared.write_result(result, inf_ts)
             self._lat_buf.push(cap_latency)
+
+            # ── Move mouse + handle blink clicks ─────────────────────────────
+            if not self.shared.is_calibrating():
+                gx = result.get("gaze_screen_x")
+                gy = result.get("gaze_screen_y")
+                if gx is not None and gy is not None:
+                    gx = max(0, min(int(self._screen_w) - 1, gx))
+                    gy = max(0, min(int(self._screen_h) - 1, gy))
+                    if not result.get("blink", False):
+                        _fast_move(gx, gy)
+
+                    current_blink = result.get("blink", False)
+                    now = time.perf_counter()
+
+                    if current_blink and not self._last_blink_state:
+                        # Rising edge: blink just started — nothing yet
+                        pass
+
+                    elif not current_blink and self._last_blink_state:
+                        # FIX #5: Falling edge — blink just ENDED.
+                        # Measure gap between this blink end and the previous blink end.
+                        # This correctly identifies double-blinks regardless of blink duration.
+                        gap = now - self._last_blink_end_time
+                        if 0 < gap < self._double_blink_win:
+                            # Double blink → toggle drag hold
+                            if not self._click_held:
+                                _fast_mouse_down()
+                                self._click_held = True
+                            else:
+                                _fast_mouse_up()
+                                self._click_held = False
+                            self._last_blink_end_time = 0.0  # Reset window
+                        else:
+                            # Single blink → click
+                            # FIX #4: Use _fast_click() (Win32) instead of pyautogui.click()
+                            # so cursor position is not overridden by pyautogui internals
+                            if not self._click_held:
+                                _fast_click()
+                            self._last_blink_end_time = now
+
+                    self._last_blink_state = current_blink
 
             self.metrics.update(
                 cap_to_inf_latency_ms=self._lat_buf.avg(),
                 blink_detected=result["blink"],
                 gaze_x=result.get("gaze_screen_x") or 0,
                 gaze_y=result.get("gaze_screen_y") or 0,
+                click_held=self._click_held,
             )
 
-            # FPS tracking
             self._fps_counter.append(inf_ts)
             if len(self._fps_counter) >= 2:
                 elapsed = self._fps_counter[-1] - self._fps_counter[0]
                 fps     = (len(self._fps_counter) - 1) / elapsed if elapsed > 0 else 0
                 self.metrics.update(inference_fps=fps)
 
-            # Sleep to hit target inference FPS
-            elapsed_total = time.perf_counter() - t_start
-            sleep_time    = interval - elapsed_total
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-        face_mesh.close()
+        if self._click_held:
+            _fast_mouse_up()
+        face_landmarker.close()
 
 # ─── Render Thread ────────────────────────────────────────────────────────────
 class RenderThread(threading.Thread):
     """
-    Reads the latest frame + inference result, draws the overlay, shows it,
-    and moves the mouse cursor.
+    Reads the latest frame + inference result, draws the overlay and shows it.
+    Mouse movement has been moved to InferenceThread for lowest latency.
     """
     def __init__(self, shared: SharedState, metrics: MetricsStore,
                  config: TierConfig, gpu_info: GPUInfo,
@@ -522,14 +590,12 @@ class RenderThread(threading.Thread):
 
         self._fps_counter    = collections.deque(maxlen=30)
         self._lat_buf        = LatencyBuffer()
-        self._click_held     = False
-        self._last_blink_state = False
-        self._last_blink_time = 0.0
-        self._double_blink_window = 0.6  # seconds allowed between blinks
 
-        # GPU VRAM polling
-        self._vram_poll_interval = 2.0  # seconds
+        self._vram_poll_interval = 2.0
         self._last_vram_poll     = 0.0
+
+        self._gui_update_interval = 0.05
+        self._last_gui_update     = 0.0
 
     def _get_vram_used(self) -> int:
         try:
@@ -547,11 +613,9 @@ class RenderThread(threading.Thread):
         h, w = frame.shape[:2]
         overlay = frame.copy()
 
-        # Semi-transparent dark bar at top
         cv2.rectangle(overlay, (0, 0), (w, 60), (10, 10, 20), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
-        # Metrics text
         fps_txt     = f"Capture: {m.capture_fps:.0f}fps  Inf: {m.inference_fps:.0f}fps  Render: {m.render_fps:.0f}fps"
         latency_txt = f"Latency  Cap\u2192Inf: {m.cap_to_inf_latency_ms:.1f}ms  Total: {m.total_latency_ms:.1f}ms"
 
@@ -560,12 +624,10 @@ class RenderThread(threading.Thread):
         cv2.putText(frame, latency_txt, (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
                     (100, 220, 255), 1, cv2.LINE_AA)
 
-        # GPU tier badge top-right
         tier_label = self.config.name.split(" ")[0]
         cv2.putText(frame, tier_label, (w - 120, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (200, 160, 255), 1, cv2.LINE_AA)
 
-        # Calibration status badge
         cal_status = self.shared.get_calibration_status()
         if cal_status == "done":
             cv2.putText(frame, "CAL OK", (w - 120, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
@@ -574,21 +636,18 @@ class RenderThread(threading.Thread):
             cv2.putText(frame, "CALIBRATING", (w - 160, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                         (250, 200, 50), 1, cv2.LINE_AA)
 
-        # Draw iris landmarks
         if result and result["iris_landmarks"]:
             for lm in result["iris_landmarks"]:
                 px = int(lm.x * w)
                 py = int(lm.y * h)
                 cv2.circle(frame, (px, py), 2, (0, 255, 255), -1)
 
-        # Draw left eye landmarks
         if result and result["left_eye"]:
             for lm in result["left_eye"]:
                 px = int(lm.x * w)
                 py = int(lm.y * h)
                 cv2.circle(frame, (px, py), 3, (0, 255, 100), -1)
 
-        # Blink indicator
         if result and result["blink"]:
             cv2.putText(frame, "BLINK", (w // 2 - 40, h - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 80, 255), 2, cv2.LINE_AA)
@@ -605,75 +664,43 @@ class RenderThread(threading.Thread):
                 time.sleep(0.01)
                 continue
 
-            frame, _      = self.shared.read_frame()
+            frame, _       = self.shared.read_frame()
             result, inf_ts = self.shared.read_result()
-            m             = self.metrics.snapshot()
+            m              = self.metrics.snapshot()
 
             if frame is None:
                 time.sleep(0.005)
                 continue
 
-            render_ts  = time.perf_counter()
-            total_lat  = (render_ts - inf_ts) * 1000 if inf_ts > 0 else 0
+            render_ts = time.perf_counter()
+            total_lat = (render_ts - inf_ts) * 1000 if inf_ts > 0 else 0
 
-            # VRAM polling (infrequent)
             if render_ts - self._last_vram_poll > self._vram_poll_interval:
                 vram = self._get_vram_used()
                 self.metrics.update(vram_used_mb=vram)
                 self._last_vram_poll = render_ts
 
-            # CPU bottleneck detection
             cpu_bottleneck = m.capture_fps < m.inference_fps * 0.8
             self.metrics.update(
                 total_latency_ms=total_lat,
                 cpu_bottleneck=cpu_bottleneck,
             )
 
-            # Mouse movement — skip when calibrating (inference still runs for gaze data)
-            if not self.shared.is_calibrating():
-                if result and result["gaze_screen_x"] is not None:
-                    # Only move if not currently blinking to reduce jitter
-                    if not result.get("blink", False):
-                        pyautogui.moveTo(result["gaze_screen_x"], result["gaze_screen_y"])
-                    
-                    # Double-blink to toggle click
-                    current_blink = result.get("blink", False)
-                    if current_blink and not self._last_blink_state:
-                        # Blink just started
-                        now = time.perf_counter()
-                        if now - self._last_blink_time < self._double_blink_window:
-                            # Double blink detected!
-                            if not self._click_held:
-                                pyautogui.mouseDown()
-                                self._click_held = True
-                            else:
-                                pyautogui.mouseUp()
-                                self._click_held = False
-                            self._last_blink_time = 0.0  # Reset
-                        else:
-                            self._last_blink_time = now
-                            
-                    self._last_blink_state = current_blink
-
-            self.metrics.update(click_held=self._click_held)
-
-            # Draw and show frame
             display = self._draw_overlay(frame.copy(), result, m)
             cv2.imshow("GazeTrack — High-Performance Eye Tracker", display)
 
-            # FPS tracking
             self._fps_counter.append(render_ts)
             if len(self._fps_counter) >= 2:
                 elapsed = self._fps_counter[-1] - self._fps_counter[0]
                 fps     = (len(self._fps_counter) - 1) / elapsed if elapsed > 0 else 0
                 self.metrics.update(render_fps=fps)
 
-            # Callback for GUI update
-            if self.on_metrics_update:
+            if self.on_metrics_update and (render_ts - self._last_gui_update >= self._gui_update_interval):
                 self.on_metrics_update(self.metrics.snapshot())
+                self._last_gui_update = render_ts
 
             key = cv2.waitKey(1)
-            if key == 27:  # ESC
+            if key == 27:
                 self.shared.stop()
                 break
 
@@ -682,33 +709,31 @@ class RenderThread(threading.Thread):
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        if self._click_held:
-            pyautogui.mouseUp()
         cv2.destroyAllWindows()
 
 # ─── Main Engine Orchestrator ─────────────────────────────────────────────────
 class GazeTrackEngine:
     def __init__(self, tier_override: Optional[GPUTier] = None,
                  on_metrics_update: Optional[Callable] = None,
-                 on_ready: Optional[Callable] = None):
+                 on_ready: Optional[Callable] = None,
+                 _cached_gpu_info: Optional[GPUInfo] = None):
         self.on_metrics_update = on_metrics_update
         self.on_ready          = on_ready
 
-        # 1. Benchmark GPU
-        self.gpu_info = benchmark_gpu()
+        # FIX #6: Accept a cached GPUInfo so switch_tier doesn't re-run nvidia-smi
+        if _cached_gpu_info is not None:
+            self.gpu_info = _cached_gpu_info
+        else:
+            self.gpu_info = benchmark_gpu()
 
-        # 2. Apply tier
         self.tier   = tier_override or self.gpu_info.tier
         self.config = TIER_CONFIGS[self.tier]
 
-        # 3. Screen size (used by calibration)
         self._screen_w, self._screen_h = pyautogui.size()
 
-        # 4. Shared state + metrics
         self.shared  = SharedState()
         self.metrics = MetricsStore()
 
-        # 5. Build threads
         self.capture_thread   = CaptureThread(self.shared, self.metrics, self.config)
         self.inference_thread = InferenceThread(self.shared, self.metrics, self.config)
         self.render_thread    = RenderThread(
@@ -719,7 +744,6 @@ class GazeTrackEngine:
     def start(self):
         self.capture_thread.start()
         self.inference_thread.start()
-        # Give capture a moment to fill the buffer
         time.sleep(0.15)
         self.render_thread.start()
         if self.on_ready:
@@ -741,26 +765,19 @@ class GazeTrackEngine:
     def start_calibration(self,
                           on_complete: Optional[Callable] = None,
                           on_cancel:   Optional[Callable] = None):
-        """
-        Launch a 9-point fullscreen calibration session.
-        Suspends mouse movement during calibration but keeps inference
-        running so raw gaze data is available for the calibration window.
-        """
         if self.shared.get_calibration_status() == "running":
-            return  # Already calibrating
+            return
 
         self.shared.set_calibration_status("running")
-        self.shared.set_calibrating(True)  # Stops mouse movement, keeps inference alive
+        self.shared.set_calibrating(True)
 
         def _get_raw_gaze():
-            """Returns the RAW normalized eye ratios for calibration."""
             result, _ = self.shared.read_result()
             if result and "gaze_ratio_x" in result and "gaze_ratio_y" in result:
-                # We use the normalized ratios (e.g., 0.3 to 0.7) as the features for calibration
-                # The calibration polynomial will stretch this to the full screen resolution!
                 rx = result["gaze_ratio_x"]
                 ry = result["gaze_ratio_y"]
-                return float(rx), float(ry)
+                if rx is not None and ry is not None:
+                    return float(rx), float(ry)
             return None
 
         def _on_complete(cmap: CalibrationMap):
@@ -785,12 +802,19 @@ class GazeTrackEngine:
         cal.start()
 
     def switch_tier(self, new_tier: GPUTier):
-        """Restart engine with a different tier."""
+        """
+        FIX #6: Restart engine with a different tier WITHOUT re-running benchmark_gpu().
+        Old code called self.__init__() which re-ran nvidia-smi (up to 3s hang).
+        Now we rebuild only the threads, reusing the cached gpu_info.
+        """
         self.stop()
         self.wait()
+
+        # Rebuild in-place, passing cached gpu_info to skip nvidia-smi
         self.__init__(
             tier_override=new_tier,
             on_metrics_update=self.on_metrics_update,
             on_ready=self.on_ready,
+            _cached_gpu_info=self.gpu_info,  # reuse — no nvidia-smi re-run
         )
         self.start()

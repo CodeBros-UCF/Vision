@@ -265,6 +265,16 @@ class CalibrationWindow(threading.Thread):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 160, 140), 1, cv2.LINE_AA)
             cv2.imshow(WIN, done_screen)
             cv2.waitKey(1200)
+        elif success and len(self._raw_collected) < 6:
+            fail_screen = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
+            cv2.putText(fail_screen, "CALIBRATION FAILED",
+                        (self.screen_w // 2 - 220, self.screen_h // 2 - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (80, 80, 255), 2, cv2.LINE_AA)
+            cv2.putText(fail_screen, f"Not enough gaze data collected ({len(self._raw_collected)}/9 points). Please try again.",
+                        (self.screen_w // 2 - 320, self.screen_h // 2 + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 250), 1, cv2.LINE_AA)
+            cv2.imshow(WIN, fail_screen)
+            cv2.waitKey(2500)
 
         cv2.destroyWindow(WIN)
 

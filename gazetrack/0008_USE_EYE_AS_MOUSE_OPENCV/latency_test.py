@@ -25,8 +25,11 @@ from gazetrack_engine import (
 
 import cv2
 import numpy as np
+import mediapipe as mp
+from mediapipe.tasks.python import vision as mp_vision
+from mediapipe.tasks.python.core.base_options import BaseOptions
 
-SEPARATOR = "─" * 68
+SEPARATOR = "-" * 68
 
 def parse_args():
     p = argparse.ArgumentParser(description="GazeTrack Latency Benchmark")
@@ -55,15 +58,27 @@ class BenchmarkInferenceThread(InferenceThread):
         self._target_frames = frames
 
     def run(self):
-        """Override to collect raw latency samples instead of sleeping."""
-        import mediapipe as mp
+        """
+        Override to collect raw latency samples instead of sleeping.
+        WARNING: This is a fragile override. It completely replaces InferenceThread.run()
+        without calling super(). If gazetrack_engine.InferenceThread.__init__ or run()
+        are modified (e.g., adding new state variables), this benchmark might break
+        and need to be manually synchronized.
+        """
+        model_path = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
 
-        face_mesh = mp.solutions.face_mesh.FaceMesh(
-            refine_landmarks=True,
-            max_num_faces=1,
-            min_detection_confidence=0.5,
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=model_path),
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
+            running_mode=mp_vision.RunningMode.IMAGE,
         )
+        face_landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+
         import pyautogui
         screen_w, screen_h = pyautogui.size()
         last_frame_ts = -1.0
@@ -83,8 +98,11 @@ class BenchmarkInferenceThread(InferenceThread):
             cap_latency = (t_inf_start - cap_ts) * 1000
 
             # Run inference
-            rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            proc = face_mesh.process(rgb)
+            h, w = frame.shape[:2]
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            detection = face_landmarker.detect(mp_image)
+
             t_inf_end   = time.perf_counter()
             inf_duration = (t_inf_end - t_inf_start) * 1000
 
@@ -95,7 +113,7 @@ class BenchmarkInferenceThread(InferenceThread):
 
             self.shared.write_result({}, t_inf_end)
 
-        face_mesh.close()
+        face_landmarker.close()
 
 
 def run_benchmark(target_frames: int = 200, warmup: int = 30,
@@ -183,7 +201,7 @@ def run_benchmark(target_frames: int = 200, warmup: int = 30,
         print(f"  {label:<30} avg={avg:6.2f}{unit}  min={minn:6.2f}{unit}  "
               f"p50={p50:6.2f}{unit}  p95={p95:6.2f}{unit}  max={maxx:6.2f}{unit}")
 
-    stat_row("Capture → Inference Latency", lats)
+    stat_row("Capture -> Inference Latency", lats)
     stat_row("Inference Duration (Mediapipe)", infs)
     combined = [l + i for l, i in zip(lats, infs)]
     stat_row("Total (Capture + Inference)", combined)
